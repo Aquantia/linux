@@ -177,6 +177,27 @@ void ethtool_convert_legacy_u32_to_link_mode(unsigned long *dst,
 bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
 				     const unsigned long *src);
 
+
+struct ethtool_eee_ext_base {
+        __u32   cmd;
+        __u32   eee_active;
+        __u32   eee_enabled;
+        __u32   tx_lpi_enabled;
+        __u32   tx_lpi_timer;
+        __s8    link_mode_masks_nwords;
+        __u32   reserved[2];
+};
+
+struct ethtool_eee_ext {
+	struct ethtool_eee_ext_base base;
+
+	struct {
+		__ETHTOOL_DECLARE_LINK_MODE_MASK(supported);
+		__ETHTOOL_DECLARE_LINK_MODE_MASK(advertised);
+		__ETHTOOL_DECLARE_LINK_MODE_MASK(lp_advertised);
+	} link_modes;
+};
+
 /**
  * struct ethtool_ops - optional netdev operations
  * @get_drvinfo: Report driver/device information.  Should only set the
@@ -386,6 +407,9 @@ struct ethtool_ops {
 				     struct ethtool_eeprom *, u8 *);
 	int	(*get_eee)(struct net_device *, struct ethtool_eee *);
 	int	(*set_eee)(struct net_device *, struct ethtool_eee *);
+	int     (*get_eee_ext)(struct net_device *, struct ethtool_eee_ext *);
+	int     (*set_eee_ext)(struct net_device *, struct ethtool_eee_ext *);
+
 	int	(*get_tunable)(struct net_device *,
 			       const struct ethtool_tunable *, void *);
 	int	(*set_tunable)(struct net_device *,

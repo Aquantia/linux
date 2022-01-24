@@ -1430,17 +1430,141 @@ static int ethtool_set_wol(struct net_device *dev, char __user *useraddr)
 	return 0;
 }
 
+
+/* EEE */
+
+
+static void
+convert_legacy_eee_to_eee_ext(
+	struct ethtool_eee_ext *eee_ext,
+	const struct ethtool_eee *eee_legacy)
+{
+	memset(eee_ext, 0, sizeof(*eee_ext));
+
+	ethtool_convert_legacy_u32_to_link_mode(
+		eee_ext->link_modes.supported,
+		eee_legacy->supported);
+	ethtool_convert_legacy_u32_to_link_mode(
+		eee_ext->link_modes.advertised,
+		eee_legacy->advertised);
+	ethtool_convert_legacy_u32_to_link_mode(
+		eee_ext->link_modes.lp_advertised,
+		eee_legacy->lp_advertised);
+
+	eee_ext->base.eee_active = eee_legacy->eee_active;
+	eee_ext->base.eee_enabled = eee_legacy->eee_enabled;
+	eee_ext->base.tx_lpi_enabled = eee_legacy->tx_lpi_enabled;
+	eee_ext->base.tx_lpi_timer = eee_legacy->tx_lpi_timer;
+}
+
+static void
+convert_link_eee_ext_to_legacy_eee(
+	struct ethtool_eee *eee_legacy,
+	const struct ethtool_eee_ext *eee_ext)
+{
+	memset(eee_legacy, 0, sizeof(*eee_legacy));
+
+	ethtool_convert_link_mode_to_legacy_u32(
+		&eee_legacy->supported,
+		eee_ext->link_modes.supported);
+	ethtool_convert_link_mode_to_legacy_u32(
+		&eee_legacy->advertised,
+		eee_ext->link_modes.advertised);
+	ethtool_convert_link_mode_to_legacy_u32(
+		&eee_legacy->lp_advertised,
+		eee_ext->link_modes.lp_advertised);
+
+	eee_legacy->eee_active = eee_ext->base.eee_active;
+	eee_legacy->eee_enabled = eee_ext->base.eee_enabled;
+	eee_legacy->tx_lpi_enabled = eee_ext->base.tx_lpi_enabled;
+	eee_legacy->tx_lpi_timer = eee_ext->base.tx_lpi_timer;
+}
+
+/* layout of the struct passed from/to userland */
+struct ethtool_eee_usettings {
+	struct ethtool_eee_settings base;
+	struct {
+		__u32 supported[__ETHTOOL_LINK_MODE_MASK_NU32];
+		__u32 advertised[__ETHTOOL_LINK_MODE_MASK_NU32];
+		__u32 lp_advertised[__ETHTOOL_LINK_MODE_MASK_NU32];
+	} link_modes;
+};
+
+static int load_eee_ext_from_user(struct ethtool_eee_ext *to,
+					 const void __user *from)
+{
+	struct ethtool_eee_usettings eee_usettings;
+
+	if (copy_from_user(&eee_usettings, from, sizeof(eee_usettings)))
+		return -EFAULT;
+
+	bitmap_from_arr32(to->link_modes.supported,
+			  eee_usettings.link_modes.supported,
+			  __ETHTOOL_LINK_MODE_MASK_NBITS);
+	bitmap_from_arr32(to->link_modes.advertised,
+			  eee_usettings.link_modes.advertised,
+			  __ETHTOOL_LINK_MODE_MASK_NBITS);
+	bitmap_from_arr32(to->link_modes.lp_advertised,
+			  eee_usettings.link_modes.lp_advertised,
+			  __ETHTOOL_LINK_MODE_MASK_NBITS);
+
+	memcpy(&to->base, &eee_usettings.base, sizeof(to->base));
+
+	return 0;
+}
+
+/* convert a kernel internal ethtool_link_ksettings to
+ * ethtool_link_usettings in user space. return 0 on success, errno on
+ * error.
+ */
+static int save_eee_ext_for_user(void __user *to,
+			      const struct ethtool_eee_ext *from)
+{
+	struct ethtool_eee_usettings eee_usettings;
+
+	memset(&eee_usettings, 0, sizeof(eee_usettings));
+
+	bitmap_to_arr32(eee_usettings.link_modes.supported,
+			from->link_modes.supported,
+			__ETHTOOL_LINK_MODE_MASK_NBITS);
+	bitmap_to_arr32(eee_usettings.link_modes.advertised,
+			from->link_modes.advertised,
+			__ETHTOOL_LINK_MODE_MASK_NBITS);
+	bitmap_to_arr32(eee_usettings.link_modes.lp_advertised,
+			from->link_modes.lp_advertised,
+			__ETHTOOL_LINK_MODE_MASK_NBITS);
+
+	memcpy(&eee_usettings.base, &from->base, sizeof(eee_usettings.base));
+
+	if (copy_to_user(to, &eee_usettings, sizeof(eee_usettings)))
+		return -EFAULT;
+
+	return 0;
+}
+
 static int ethtool_get_eee(struct net_device *dev, char __user *useraddr)
 {
 	struct ethtool_eee edata;
 	int rc;
 
-	if (!dev->ethtool_ops->get_eee)
+	if (!dev->ethtool_ops->get_eee &&
+			!dev->ethtool_ops->get_eee_ext)
 		return -EOPNOTSUPP;
 
 	memset(&edata, 0, sizeof(struct ethtool_eee));
 	edata.cmd = ETHTOOL_GEEE;
-	rc = dev->ethtool_ops->get_eee(dev, &edata);
+
+	if (dev->ethtool_ops->get_eee_ext) {
+		struct ethtool_eee_ext edata_ext;
+		memset(&edata_ext, 0, sizeof(struct ethtool_eee_ext));
+		rc = dev->ethtool_ops->get_eee_ext(dev, &edata_ext);
+
+		if (rc == 0) {
+			convert_link_eee_ext_to_legacy_eee(&edata, &edata_ext);
+		}
+	} else {
+		rc = dev->ethtool_ops->get_eee(dev, &edata);
+	}
 
 	if (rc)
 		return rc;
@@ -1455,13 +1579,149 @@ static int ethtool_set_eee(struct net_device *dev, char __user *useraddr)
 {
 	struct ethtool_eee edata;
 
-	if (!dev->ethtool_ops->set_eee)
+	if (!dev->ethtool_ops->set_eee &&
+		!dev->ethtool_ops->set_eee_ext)
 		return -EOPNOTSUPP;
 
 	if (copy_from_user(&edata, useraddr, sizeof(edata)))
 		return -EFAULT;
 
+	if (dev->ethtool_ops->set_eee_ext) {
+		struct ethtool_eee_ext edata_ext;
+		memset(&edata_ext, 0, sizeof(struct ethtool_eee_ext));
+
+		convert_legacy_eee_to_eee_ext(&edata_ext ,&edata);
+
+		return dev->ethtool_ops->set_eee_ext(dev, &edata_ext);
+	}
+
 	return dev->ethtool_ops->set_eee(dev, &edata);
+}
+
+static int ethtool_get_eee_ext(struct net_device *dev, char __user *useraddr)
+{
+	struct ethtool_eee_ext edata_ext;
+	int rc;
+
+	if (!dev->ethtool_ops->get_eee &&
+			!dev->ethtool_ops->get_eee_ext)
+		return -EOPNOTSUPP;
+
+	/* handle bitmap nbits handshake */
+	if (copy_from_user(&edata_ext.base, useraddr,
+			   sizeof(edata_ext.base)))
+		return -EFAULT;
+
+	if (__ETHTOOL_LINK_MODE_MASK_NU32
+	    != edata_ext.base.link_mode_masks_nwords) {
+		/* wrong link mode nbits requested */
+		memset(&edata_ext, 0, sizeof(edata_ext));
+		edata_ext.base.cmd = ETHTOOL_GEEE_EXT;
+
+		/* send back number of words required as negative val */
+		compiletime_assert(__ETHTOOL_LINK_MODE_MASK_NU32 <= S8_MAX,
+				   "need too many bits for link modes!");
+		edata_ext.base.link_mode_masks_nwords
+			= -((s8)__ETHTOOL_LINK_MODE_MASK_NU32);
+
+		/* copy the base fields back to user, not the link
+		 * mode bitmaps
+		 */
+		if (copy_to_user(useraddr, &edata_ext.base,
+				 sizeof(edata_ext.base)))
+			return -EFAULT;
+
+		return 0;
+	}
+
+	/* handshake successful: user/kernel agree on
+	 * link_mode_masks_nwords
+	 */
+
+	if (dev->ethtool_ops->get_eee_ext) {
+		rc = dev->ethtool_ops->get_eee_ext(dev, &edata_ext);
+	} else {
+		/* Handle legacy U32 get_eee call */
+		struct ethtool_eee eee_data;
+		memset(&eee_data, 0, sizeof(struct ethtool_eee));
+
+		rc = dev->ethtool_ops->get_eee(dev, &eee_data);
+
+		if (rc == 0) {
+			convert_legacy_eee_to_eee_ext(&edata_ext, &eee_data);
+		}
+	}
+
+	if (rc)
+		return rc;
+
+	/* make sure we tell the right values to user */
+	edata_ext.base.cmd = ETHTOOL_GEEE_EXT;
+	edata_ext.base.link_mode_masks_nwords
+		= __ETHTOOL_LINK_MODE_MASK_NU32;
+
+	rc = save_eee_ext_for_user(useraddr, &edata_ext);
+
+	return rc;
+}
+
+static int ethtool_set_eee_ext(struct net_device *dev, char __user *useraddr)
+{
+	struct ethtool_eee_ext edata_ext;
+	int rc = 0;
+
+	if (!dev->ethtool_ops->set_eee &&
+		!dev->ethtool_ops->set_eee_ext)
+		return -EOPNOTSUPP;
+
+	/* handle bitmap nbits handshake */
+	/* Copy only base */
+	if (copy_from_user(&edata_ext.base, useraddr,
+			   sizeof(edata_ext.base)))
+		return -EFAULT;
+
+	if (__ETHTOOL_LINK_MODE_MASK_NU32
+	    != edata_ext.base.link_mode_masks_nwords) {
+		/* wrong link mode nbits requested */
+		memset(&edata_ext, 0, sizeof(edata_ext));
+		edata_ext.base.cmd = ETHTOOL_GEEE_EXT;
+
+		/* send back number of words required as negative val */
+		compiletime_assert(__ETHTOOL_LINK_MODE_MASK_NU32 <= S8_MAX,
+				   "need too many bits for link modes!");
+		edata_ext.base.link_mode_masks_nwords
+			= -((s8)__ETHTOOL_LINK_MODE_MASK_NU32);
+
+		/* copy the base fields back to user, not the link
+		 * mode bitmaps
+		 */
+		if (copy_to_user(useraddr, &edata_ext.base,
+				 sizeof(edata_ext.base)))
+			return -EFAULT;
+
+		return 0;
+	}
+
+	/* handshake successful: user/kernel agree on
+	 * link_mode_masks_nwords.
+	 * copy full eee struct
+	 */
+
+	rc = load_eee_ext_from_user(&edata_ext, useraddr);
+
+	if (rc)
+		return -EFAULT;
+
+	if (dev->ethtool_ops->set_eee_ext) {
+		return dev->ethtool_ops->set_eee_ext(dev, &edata_ext);
+	} else {
+		struct ethtool_eee eee_data;
+		memset(&eee_data, 0, sizeof(struct ethtool_eee));
+
+		convert_link_eee_ext_to_legacy_eee(&eee_data, &edata_ext);
+
+		return dev->ethtool_ops->set_eee(dev, &eee_data);
+	}
 }
 
 static int ethtool_nway_reset(struct net_device *dev)
@@ -2612,6 +2872,7 @@ int dev_ethtool(struct net *net, struct ifreq *ifr)
 	case ETHTOOL_GCHANNELS:
 	case ETHTOOL_GET_TS_INFO:
 	case ETHTOOL_GEEE:
+	case ETHTOOL_GEEE_EXT:
 	case ETHTOOL_GTUNABLE:
 	case ETHTOOL_PHY_GTUNABLE:
 	case ETHTOOL_GLINKSETTINGS:
@@ -2661,6 +2922,12 @@ int dev_ethtool(struct net *net, struct ifreq *ifr)
 		break;
 	case ETHTOOL_SEEE:
 		rc = ethtool_set_eee(dev, useraddr);
+		break;
+	case ETHTOOL_GEEE_EXT:
+		rc = ethtool_get_eee_ext(dev, useraddr);
+		break;
+	case ETHTOOL_SEEE_EXT:
+		rc = ethtool_set_eee_ext(dev, useraddr);
 		break;
 	case ETHTOOL_NWAY_RST:
 		rc = ethtool_nway_reset(dev);

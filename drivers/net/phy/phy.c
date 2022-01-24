@@ -28,6 +28,7 @@
 #include <linux/io.h>
 #include <linux/uaccess.h>
 #include <linux/atomic.h>
+#include <linux/linkmode.h>
 
 #define PHY_STATE_TIME	HZ
 
@@ -970,28 +971,35 @@ void phy_mac_interrupt(struct phy_device *phydev)
 }
 EXPORT_SYMBOL(phy_mac_interrupt);
 
-static void mmd_eee_adv_to_linkmode(unsigned long *advertising, u16 eee_adv)
+static void mmd_eee_adv_to_linkmode(unsigned long *link_mode, u16 eee_adv, u16 eee_adv2)
 {
-	linkmode_zero(advertising);
+	linkmode_zero(link_mode);
 
 	if (eee_adv & MDIO_EEE_100TX)
 		linkmode_set_bit(ETHTOOL_LINK_MODE_100baseT_Full_BIT,
-				 advertising);
+				 link_mode);
 	if (eee_adv & MDIO_EEE_1000T)
 		linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
-				 advertising);
+				 link_mode);
 	if (eee_adv & MDIO_EEE_10GT)
 		linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
-				 advertising);
+				 link_mode);
 	if (eee_adv & MDIO_EEE_1000KX)
 		linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseKX_Full_BIT,
-				 advertising);
+				 link_mode);
 	if (eee_adv & MDIO_EEE_10GKX4)
 		linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseKX4_Full_BIT,
-				 advertising);
+				 link_mode);
 	if (eee_adv & MDIO_EEE_10GKR)
 		linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseKR_Full_BIT,
-				 advertising);
+				 link_mode);
+
+	if (eee_adv2 & MDIO_EEE_2_5GT)
+		linkmode_set_bit(ETHTOOL_LINK_MODE_2500baseT_Full_BIT,
+				 link_mode);
+	if (eee_adv2 & MDIO_EEE_5GT)
+		linkmode_set_bit(ETHTOOL_LINK_MODE_5000baseT_Full_BIT,
+				 link_mode);
 }
 
 /**
@@ -1016,6 +1024,7 @@ int phy_init_eee(struct phy_device *phydev, bool clk_stop_enable)
 		__ETHTOOL_DECLARE_LINK_MODE_MASK(lp);
 		__ETHTOOL_DECLARE_LINK_MODE_MASK(adv);
 		int eee_lp, eee_cap, eee_adv;
+		int eee_lp2, eee_cap2, eee_adv2;
 		int status;
 		u32 cap;
 
@@ -1029,8 +1038,14 @@ int phy_init_eee(struct phy_device *phydev, bool clk_stop_enable)
 		if (eee_cap <= 0)
 			goto eee_exit_err;
 
+		eee_cap2 = phy_read_mmd(phydev, MDIO_MMD_PCS, MDIO_PCS_EEE_ABLE2);
+		if (eee_cap2 < 0) {
+			eee_cap2 = 0; /* ignore error for ext EEE */
+		}
+
 		cap = mmd_eee_cap_to_ethtool_sup_t(eee_cap);
-		if (!cap)
+
+		if (!cap && !(eee_cap2 & MDIO_EEE_2_5GT || eee_cap2 & MDIO_EEE_5GT))
 			goto eee_exit_err;
 
 		/* Check which link settings negotiated and verify it in
@@ -1040,16 +1055,28 @@ int phy_init_eee(struct phy_device *phydev, bool clk_stop_enable)
 		if (eee_lp <= 0)
 			goto eee_exit_err;
 
+		eee_lp2 = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_LPABLE2);
+		if (eee_lp2 < 0) {
+			eee_lp2 = 0; /* ignore error for ext EEE */;
+		}
+
 		eee_adv = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_ADV);
 		if (eee_adv <= 0)
 			goto eee_exit_err;
 
-		mmd_eee_adv_to_linkmode(adv, eee_adv);
-		mmd_eee_adv_to_linkmode(lp, eee_lp);
+
+		eee_adv2 = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_ADV2);
+		if (eee_adv2 < 0) {
+			eee_adv2 = 0; /* ignore error for ext EEE*/
+		}
+
+		mmd_eee_adv_to_linkmode(adv, eee_adv, eee_adv2);
+		mmd_eee_adv_to_linkmode(lp, eee_lp, eee_lp2);
 		linkmode_and(common, adv, lp);
 
-		if (!phy_check_valid(phydev->speed, phydev->duplex, common))
+		if (!phy_check_valid(phydev->speed, phydev->duplex, common)) {
 			goto eee_exit_err;
+		}
 
 		if (clk_stop_enable)
 			/* Configure the PHY to stop receiving xMII
@@ -1167,6 +1194,151 @@ int phy_ethtool_set_eee(struct phy_device *phydev, struct ethtool_eee *data)
 	return 0;
 }
 EXPORT_SYMBOL(phy_ethtool_set_eee);
+
+//Marvell changes for EEE 2.5G/5G
+/**
+ * phy_ethtool_get_eee_ext - get EEE supported and status
+ * @phydev: target phy_device struct
+ * @data: ethtool_eee_ext data
+ *
+ * Description: it reportes the Supported/Advertisement/LP Advertisement
+ * capabilities.
+ */
+int phy_ethtool_get_eee_ext(struct phy_device *phydev, struct ethtool_eee_ext *data)
+{
+	int val, val2;
+
+	if (!phydev->drv)
+		return -EIO;
+
+	/* Get Supported EEE */
+	val = phy_read_mmd(phydev, MDIO_MMD_PCS, MDIO_PCS_EEE_ABLE);
+	if (val < 0)
+		return val;
+
+	val2 = phy_read_mmd(phydev, MDIO_MMD_PCS, MDIO_PCS_EEE_ABLE2);
+	if (val2 < 0)
+		val2 = 0; /* Ignore error for vendor EEE */
+
+	mmd_eee_adv_to_linkmode(data->link_modes.supported, val, val2);
+
+	/* Get advertisement EEE */
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_ADV);
+	if (val < 0)
+		return val;
+
+	val2 = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_ADV2);
+	if (val2 < 0)
+		val = 0; /* Ignore error for vendor EEE */
+
+	mmd_eee_adv_to_linkmode(data->link_modes.advertised, val, val2);
+
+	data->base.eee_enabled = !linkmode_empty(data->link_modes.advertised);
+
+	/* Get Standard LP advertisement EEE */
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_LPABLE);
+	if (val < 0)
+		return val;
+
+	val2 = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_LPABLE2);
+	if (val2 < 0)
+		val = 0; /* Ignore error for vendor EEE */
+
+	mmd_eee_adv_to_linkmode(data->link_modes.lp_advertised, val, val2);
+
+	data->base.eee_active = linkmode_intersects(data->link_modes.advertised, data->link_modes.lp_advertised);
+
+	return 0;
+}
+EXPORT_SYMBOL(phy_ethtool_get_eee_ext);
+
+/**
+ * phy_ethtool_set_eee_ext - set EEE supported and status
+ * @phydev: target phy_device struct
+ * @data: ethtool_eee_ext data
+ *
+ * Description: it is to program the Advertisement EEE register.
+ */
+int phy_ethtool_set_eee_ext(struct phy_device *phydev, struct ethtool_eee_ext *data)
+{
+	int std_cap, old_std_adv, std_adv = 0;
+	int ext_cap, old_ext_adv, ext_adv = 0;/* Vendor specific EEE modes for 2.5G/5G */
+	int need_restart_aneg = 0;
+	int ret;
+
+	if (!phydev->drv)
+		return -EIO;
+
+	/* Get Supported EEE */
+	std_cap = phy_read_mmd(phydev, MDIO_MMD_PCS, MDIO_PCS_EEE_ABLE);
+	if (std_cap < 0)
+		return std_cap;
+
+	ext_cap = phy_read_mmd(phydev, MDIO_MMD_PCS, MDIO_PCS_EEE_ABLE2);
+	if (ext_cap < 0) {
+		ext_cap = 0;
+	}
+
+	old_std_adv = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_ADV);
+	if (old_std_adv < 0)
+		return old_std_adv;
+
+	old_ext_adv = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_ADV2);
+	if (old_ext_adv < 0) {
+		old_ext_adv = 0;
+	}
+
+	if (data->base.eee_enabled) {
+		if (linkmode_empty(data->link_modes.advertised)) {
+			std_adv = std_cap;
+			ext_adv = ext_cap;
+		} else {
+			ethtool_convert_link_mode_to_legacy_u32(&std_adv, data->link_modes.advertised);
+			std_adv = ethtool_adv_to_mmd_eee_adv_t(std_adv) & std_cap;
+
+			if (linkmode_test_bit(ETHTOOL_LINK_MODE_2500baseT_Full_BIT, data->link_modes.advertised))
+				ext_adv = MDIO_EEE_2_5GT;
+
+			if (linkmode_test_bit(ETHTOOL_LINK_MODE_5000baseT_Full_BIT, data->link_modes.advertised))
+				ext_adv = MDIO_EEE_5GT;
+
+			ext_adv = ext_adv & ext_cap;
+		}
+
+		/* Mask prohibited EEE modes */
+		std_adv &= ~phydev->eee_broken_modes;
+		ext_adv &= ~phydev->eee_broken_modes;
+	}
+
+	if (old_std_adv != std_adv) {
+		ret = phy_write_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_ADV, std_adv);
+		if (ret < 0)
+			return ret;
+		need_restart_aneg = 1;
+	}
+
+	if (old_ext_adv != ext_adv) {
+		ret = phy_write_mmd(phydev, MDIO_MMD_AN, MDIO_AN_EEE_ADV2, ext_adv);
+		if (ret < 0)
+			return ret;
+		need_restart_aneg = 1;
+	}
+
+	if (need_restart_aneg) {
+		/* Restart autonegotiation so the new modes get sent to the
+		 * link partner.
+		 */
+		if (phydev->autoneg == AUTONEG_ENABLE) {
+			ret = phy_restart_aneg(phydev);
+			if (ret < 0)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(phy_ethtool_set_eee_ext);
+
 
 int phy_ethtool_set_wol(struct phy_device *phydev, struct ethtool_wolinfo *wol)
 {
