@@ -1,0 +1,47 @@
+Aquantia PHY properties.
+
+These properties cover the base properties Aquantia AQR PHYs.
+
+
+Optional properties:
+ - aquantia,led-mode : LED mode values to set for PHY LED's.
+
+Aquantia AQR PHY has three LED which used to indicate current link mode and network activity.
+Each LED can be configured to display specific link speed modes and shows activity according to provided settings.
+
+
+led-mode = <"LED number (valid values: 0,1,2)" "LED mode value (please see format below)" ...>;
+
+Example #1:
+led-mode = <0 0x40 1 0x80 2 0x100>;
+
+Here:
+configure LED0 with value 0x40, LED2 with value 0x80 and LED3 with value 0x100.
+
+Example #2:
+led-mode = <0 0x40>;
+
+Here:
+configure only LED0 with value 0x40.
+
+LED mode format:
+
+
+Bit         Description
+-----------------------------------------------------
+F           LED is on when link connects at 5Gb/s
+E           LED is on when link connects at 2.5Gb/s
+8           LED is always ON
+7           LED is on when link connects at 10Gb/s
+6           LED is on when link connects at 1Gb/s
+5           LED is on when link connects at 100Mb/s
+4           LED is on when attemping to connect.
+3           LED is toggled on receive activity.
+2           LED is toggles on transmit activity.
+1:0         LED activity stretch value:
+              0x3 = 100ms.
+              0x2 = 60ms.
+              0x1 = 28ms.
+              0x0 = no stretching.
+
+

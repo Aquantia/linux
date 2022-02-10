@@ -56,6 +56,10 @@ static const struct aqr107_hw_stat aqr107_hw_stats[] = {
 struct aqr107_priv {
 	u64 sgmii_stats[AQR107_SGMII_STAT_SZ];
 
+	int led_mode0;
+	int led_mode1;
+	int led_mode2;
+
 #if IS_ENABLED(CONFIG_AQUANTIA_MACSEC)
 	struct aqr_port port;
 	struct aqr_macsec_cfg macsec_cfg;
